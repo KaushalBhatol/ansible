@@ -1,0 +1,137 @@
+---
+- name: Install and Configure Wazuh Server
+  hosts: wazuh
+  become: yes
+
+  environment:
+    NODE_NAME: "wazuh-1"
+
+  tasks:
+    - name: Install required packages
+      apt:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - gnupg
+        - apt-transport-https
+        - curl
+
+    - name: Import Wazuh GPG key
+      ansible.builtin.shell: |
+        curl -s https://packages.wazuh.com/key/GPG-KEY-WAZUH | gpg --no-default-keyring --keyring gnupg-ring:/usr/share/keyrings/wazuh.gpg --import && chmod 644 /usr/share/keyrings/wazuh.gpg
+
+    - name: Add Wazuh repository
+      ansible.builtin.shell: |
+        echo "deb [signed-by=/usr/share/keyrings/wazuh.gpg] https://packages.wazuh.com/4.x/apt/ stable main" | tee -a /etc/apt/sources.list.d/wazuh.list
+
+    - name: Update package information
+      apt:
+        update_cache: yes
+
+    - name: Install Wazuh Manager
+      ansible.builtin.apt:
+        name: wazuh-manager
+        state: present
+
+    - name: Enable and start Wazuh Manager service
+      ansible.builtin.systemd:
+        name: wazuh-manager
+        daemon_reload: yes
+        enabled: yes
+        state: started
+
+    - name: Install Filebeat
+      ansible.builtin.apt:
+        name: filebeat
+        state: present
+
+    - name: Copy Filebeat configuration file
+      template:
+        src: /home/{{ control_username }}/filebeat.yml.j2  # Path to your local Jinja2 template file
+        dest: /etc/filebeat/filebeat.yml  # Destination path and new name on the remote machine
+        mode: "0644"  # Permissions for the file on the remote machine
+
+    - name: Create Filebeat keystore for credentials
+      ansible.builtin.shell: "filebeat keystore create"
+
+    - name: Add default username to Filebeat keystore
+      ansible.builtin.shell: "echo admin | filebeat keystore add username --stdin --force"
+
+    - name: Add default password to Filebeat keystore
+      ansible.builtin.shell: "echo admin | filebeat keystore add password --stdin --force"
+
+    - name: Download Wazuh Alerts Template
+      ansible.builtin.get_url:
+        url: "https://raw.githubusercontent.com/wazuh/wazuh/v4.7.3/extensions/elasticsearch/7.x/wazuh-template.json"
+        dest: "/etc/filebeat/wazuh-template.json"
+        mode: '0644'
+
+    - name: Set Permissions for Wazuh Alerts Template
+      ansible.builtin.file:
+        path: "/etc/filebeat/wazuh-template.json"
+        mode: 'go+r'
+
+    - name: Install Wazuh Module for Filebeat
+      ansible.builtin.shell: "curl -s https://packages.wazuh.com/4.x/filebeat/wazuh-filebeat-0.3.tar.gz | tar -xvz -C /usr/share/filebeat/module"
+
+    - name: Create certs directory
+      ansible.builtin.file:
+        path: /etc/filebeat/certs
+        state: directory
+        mode: '0755'
+      register: mkdir_result
+
+    - name: Extract Certificate Files
+      ansible.builtin.command:
+        cmd: "tar -xf /home/{{ target_username }}/wazuh-certificates.tar -C /etc/filebeat/certs/ ./$NODE_NAME.pem ./$NODE_NAME-key.pem ./root-ca.pem"
+      when: mkdir_result is succeeded
+
+    - name: Rename PEM file
+      ansible.builtin.command:
+        cmd: "mv -n /etc/filebeat/certs/$NODE_NAME.pem /etc/filebeat/certs/filebeat.pem"
+      when: mkdir_result is succeeded
+
+    - name: Rename KEY file
+      ansible.builtin.command:
+        cmd: "mv -n /etc/filebeat/certs/$NODE_NAME-key.pem /etc/filebeat/certs/filebeat-key.pem"
+      when: mkdir_result is succeeded
+
+    - name: Change permissions of certs directory
+      ansible.builtin.file:
+        path: /etc/filebeat/certs
+        mode: '0500'
+      when: mkdir_result is succeeded
+
+    - name: Change permissions of PEM file
+      ansible.builtin.command:
+        cmd: "chmod 400 /etc/filebeat/certs/filebeat.pem"
+      when: mkdir_result is succeeded
+
+    - name: Change permissions of KEY file
+      ansible.builtin.command:
+        cmd: "chmod 400 /etc/filebeat/certs/filebeat-key.pem"
+      when: mkdir_result is succeeded
+
+    - name: Change permissions of ROOT file
+      ansible.builtin.command:
+        cmd: "chmod 400 /etc/filebeat/certs/root-ca.pem"
+      when: mkdir_result is succeeded
+
+    - name: Change owner of certs directory
+      ansible.builtin.command:
+        cmd: "chown -R root:root /etc/filebeat/certs"
+      when: mkdir_result is succeeded
+
+    - name: Reload systemd daemon
+      ansible.builtin.systemd:
+        daemon_reload: yes
+
+    - name: Enable Filebeat service
+      ansible.builtin.service:
+        name: filebeat
+        enabled: yes
+
+    - name: Start Filebeat service
+      ansible.builtin.service:
+        name: filebeat
+        state: started

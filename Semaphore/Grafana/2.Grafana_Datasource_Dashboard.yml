@@ -1,0 +1,77 @@
+---
+- name: Add Datasource and Dashboard
+  hosts: servers
+  become: yes  # Ensure that you have sudo privileges
+
+  vars:
+    data_uid: "data_uid"
+
+  tasks:
+    - name: Create Elasticsearch datasource
+      action: community.grafana.grafana_datasource
+      args:
+        name: "{{ datasource_name }}"
+        grafana_url: "http://{{ ip_address }}:3000"
+        grafana_user: "{{ grafana_username }}"
+        grafana_password: "{{ grafana_password }}"
+        org_id: "1"
+        ds_type: "elasticsearch"
+        ds_url: "{{ datasource_url }}"
+        database:  "wazuh-alerts-*"
+        basic_auth_user: "{{ auth_username }}"
+        basic_auth_password: "{{ auth_password }}"
+        time_field: "@timestamp"
+        time_interval: "10s"
+        interval: ""
+        es_version: 7.10+
+        tls_skip_verify: yes
+        max_concurrent_shard_requests: 5
+
+    - name: Copy Dashboard File
+      template:
+        src: /home/{{ control_node }}/dashboard.json  # Path to your local Jinja2 template file
+        dest: /home/{{ ansible_username }}/dashboard.json  # Destination path and new name on the remote machine
+        owner: "root"  # Owner of the file on the remote machine
+        group: "root"  # Group of the file on the remote machine
+        mode: "0644"  # Permissions for the file on the remote machine
+
+    - name: Get datasources list
+      action: ansible.builtin.uri
+      args:
+        url: "http://{{ ip_address }}:3000/api/datasources"
+        headers:
+          Authorization: "Basic {{ '{{ grafana_username }}:{{ grafana_password }}' | b64encode }}"
+          Content-Type: "application/json"
+        method: GET
+        return_content: yes
+      register: datasources_response
+  
+    - name: Extract UID
+      action: ansible.builtin.set_fact
+      args:
+        datasource_uid: "{{ item.uid }}"
+      loop: "{{ datasources_response.json }}"
+      when: item.name == '{{ datasource_name }}'
+  
+    - name: Print UID
+      action: ansible.builtin.debug
+      args:
+        msg: "The UID of the datasource is {{ datasource_uid }}"
+      when: datasource_uid is defined
+
+    - name: Find and replace all occurrences in a JSON file
+      action: ansible.builtin.replace
+      args:
+        path: "/home/{{ ansible_username }}/dashboard.json"  # Replace with the path to your JSON file
+        regexp: "{{ data_uid | regex_escape }}"
+        replace: "{{ datasource_uid }}"
+  
+    - name: Import dashboard
+      action: community.grafana.grafana_dashboard
+      args:
+        grafana_url: "http://{{ ip_address }}:3000"
+        grafana_user: "{{ grafana_username }}"
+        grafana_password: "{{ grafana_password }}"
+        state: present
+        overwrite: true
+        path: "/home/{{ ansible_username }}/dashboard.json"

@@ -1,0 +1,95 @@
+---
+- name: Configure Wazuh Dashboard
+  hosts: servers
+  become: yes
+
+  environment:
+    NODE_NAME: "dashboard"
+
+  tasks:
+    - name: Install required packages
+      package:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - debhelper
+        - tar
+        - curl
+        - libcap2-bin
+        - gnupg
+        - apt-transport-https
+        - curl
+
+    - name: Import Wazuh GPG key
+      shell: "curl -s https://packages.wazuh.com/key/GPG-KEY-WAZUH | gpg --no-default-keyring --keyring gnupg-ring:/usr/share/keyrings/wazuh.gpg --import && chmod 644 /usr/share/keyrings/wazuh.gpg"
+      args:
+        creates: /usr/share/keyrings/wazuh.gpg
+
+    - name: Add Wazuh repository
+      shell: "echo 'deb [signed-by=/usr/share/keyrings/wazuh.gpg] https://packages.wazuh.com/4.x/apt/ stable main' | tee -a /etc/apt/sources.list.d/wazuh.list"
+      args:
+        creates: /etc/apt/sources.list.d/wazuh.list
+
+    - name: Update package information
+      shell: apt-get update
+
+    - name: Install Wazuh Dashboard
+      shell:
+        cmd: "apt-get -y install wazuh-dashboard"
+
+    - name: Copy Dashboard Configuration File
+      template:
+        src: /home/{{ control_node }}/opensearch_dashboards.yml.j2  # Path to your local Jinja2 template file
+        dest: /etc/wazuh-dashboard/opensearch_dashboards.yml  # Destination path and new name on the remote machine
+        owner: "root"  # Owner of the file on the remote machine
+        group: "root"  # Group of the file on the remote machine
+        mode: "0644"  # Permissions for the file on the remote machine
+
+    - name: Create certs directory
+      file:
+        path: "/etc/wazuh-dashboard/certs"
+        state: directory
+
+    - name: Extract certificates
+      shell:
+        cmd: "tar -xf /home/{{ ansible_username }}/wazuh-certificates.tar -C /etc/wazuh-dashboard/certs/ ./$NODE_NAME.pem ./$NODE_NAME-key.pem ./root-ca.pem"
+
+    - name: Rename certificate files
+      shell:
+        cmd: "mv -n /etc/wazuh-dashboard/certs/$NODE_NAME.pem /etc/wazuh-dashboard/certs/dashboard.pem && mv -n /etc/wazuh-dashboard/certs/$NODE_NAME-key.pem /etc/wazuh-dashboard/certs/dashboard-key.pem"
+
+    - name: Rename key files
+      shell:
+        cmd: "mv -n /etc/wazuh-dashboard/certs/$NODE_NAME-key.pem /etc/wazuh-dashboard/certs/dashboard-key.pem"
+
+    - name: Set permissions for certs directory
+      file:
+        path: "/etc/wazuh-dashboard/certs"
+        mode: "0500"
+
+    - name: Set permissions on certificate files
+      file:
+        path: "/etc/wazuh-dashboard/certs/{{ item }}"
+        mode: "0400"
+      loop:
+        - dashboard-key.pem
+        - dashboard.pem
+        - root-ca.pem
+
+    - name: Change ownership of certs directory
+      shell:
+        cmd: "chown -R wazuh-dashboard:wazuh-dashboard /etc/wazuh-dashboard/certs"
+
+    - name: Reload systemd daemon
+      systemd:
+        daemon_reload: yes
+
+    - name: Enable Wazuh Dashboard service
+      service:
+        name: wazuh-dashboard
+        enabled: yes
+
+    - name: Start Wazuh Dashboard service
+      service:
+        name: wazuh-dashboard
+        state: started
